@@ -1,0 +1,9 @@
+# Streamlit app
+streamlit>=1.28
+pandas>=2.0
+numpy>=1.24
+plotly>=5.18
+pyarrow>=14.0
+
+# Optional: skillcorner_dynamic_events_analysis.py
+matplotlib>=3.7

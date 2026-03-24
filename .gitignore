@@ -1,0 +1,84 @@
+# ── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.virtualenv/
+
+# Testing / typing / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ── OS ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Editors / IDE ─────────────────────────────────────────────────
+.idea/
+*.swp
+*.swo
+*~
+
+# VS Code (personal settings; uncomment if you want to share .vscode)
+# .vscode/
+
+# ── Environment & secrets ─────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+
+# Streamlit (never commit API keys / paths you consider secret)
+.streamlit/secrets.toml
+
+# Dataset (entire tree: parquet, CSV, meta, cache, derived pickles, local .venv, notebooks, etc.)
+dynamic_events_pl_24/
+
+# Compressed exports / full dumps (often huge; same idea as ignoring the dataset folder)
+*.7z
+*.zip
+*.rar
+
+# PDFs (specs & decks are large / licensed; remove this line if you want them on GitHub)
+*.pdf
+
+# ── Misc ─────────────────────────────────────────────────────────
+*.log
+.cache/
