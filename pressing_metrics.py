@@ -49,6 +49,19 @@ def _team_obe(df: pd.DataFrame, team: str) -> pd.DataFrame:
     return obe[obe["team_shortname"] == team]
 
 
+# Team-relative thirds: middle + attacking = opponent half (beyond halfway, toward their goal).
+OBE_OPPONENT_HALF_THIRDS = frozenset({"middle_third", "attacking_third"})
+
+
+def _obe_opponent_half(obe: pd.DataFrame) -> pd.DataFrame:
+    """OBE rows where the engagement starts in the pressing team's opponent half."""
+    if len(obe) == 0:
+        return obe
+    if "third_start" not in obe.columns:
+        return obe
+    return obe[obe["third_start"].isin(OBE_OPPONENT_HALF_THIRDS)]
+
+
 def _per_match(value: float, n_matches: int) -> float:
     return round(value / max(n_matches, 1), 2)
 
@@ -130,6 +143,45 @@ def forced_long_ball_ratio(df: pd.DataFrame, team: str, match_id: int | None = N
         "high_block_passes_d3": hb_total,
         "high_block_long_d3": int(hb_long),
         "forced_backward": int(forced_backward),
+    }
+
+
+# Ham exportta PO satırında `is_available` yok; D3 uzun pas anındaki `n_passing_options`
+# ile “kısa opsiyon kısıtlı” proxy’si (≤ bu eşik → zorlanmış say).
+FORCED_LONG_STRICT_MAX_PASSING_OPTIONS = 1
+
+
+def forced_long_ball_strict(
+    df: pd.DataFrame,
+    team: str,
+    match_id: int | None = None,
+    *,
+    max_passing_options: int = FORCED_LONG_STRICT_MAX_PASSING_OPTIONS,
+) -> dict:
+    """
+    Tek oran: rakibin D3'ten attığı **tüm** uzun paslara göre, bunların kaçında hem
+    **high_block** hem de `n_passing_options` ≤ eşik (düşük opsiyon proxy).
+
+    Pay: HB ∧ düşük-opt ∧ uzun (D3). Payda: rakibin D3 uzun pas sayısı (tüm fazlar).
+    """
+    data = df if match_id is None else df[df["match_id"] == match_id]
+    opp_pp = _opponent_pp(data, team)
+    d3_passes = opp_pp[
+        (opp_pp["third_start"] == "defensive_third") & (opp_pp["end_type"] == "pass")
+    ]
+    longs = d3_passes[d3_passes["pass_range"] == "long"].copy()
+    n_opt = longs["n_passing_options"].fillna(999)
+    den = len(longs)
+    mask = (longs["team_out_of_possession_phase_type"] == "high_block") & (
+        n_opt <= max_passing_options
+    )
+    num = int(mask.sum())
+    rate = num / max(den, 1)
+
+    return {
+        "strict_long_hb_lowopt_rate": round(rate, 4),
+        "strict_long_hb_lowopt_nt": f"{num}/{den}",
+        "strict_long_hb_lowopt_max_options": max_passing_options,
     }
 
 
@@ -315,14 +367,19 @@ def chances_after_pressing(df: pd.DataFrame, team: str, match_id: int | None = N
     """
     Does the opponent create chances after/during our pressing?
     Measures how exposed the press leaves us.
+
+    Beaten counts and beaten_rate use only OBE rows with third_start in the opponent half
+    (middle_third + attacking_third, team-relative). Danger and shot metrics still use all OBE.
     """
     data = df if match_id is None else df[df["match_id"] == match_id]
     obe = _team_obe(data, team)
     n_matches = obe["match_id"].nunique()
     total_obe = len(obe)
 
-    beaten_pos = obe["beaten_by_possession"].sum()
-    beaten_mov = obe["beaten_by_movement"].sum()
+    obe_oh = _obe_opponent_half(obe)
+    n_oh = len(obe_oh)
+    beaten_pos = int(obe_oh["beaten_by_possession"].sum())
+    beaten_mov = int(obe_oh["beaten_by_movement"].sum())
     poss_danger = obe["possession_danger"].sum()
 
     regain_types = {"direct_regain", "indirect_regain"}
@@ -334,12 +391,13 @@ def chances_after_pressing(df: pd.DataFrame, team: str, match_id: int | None = N
         "shots_after_pressing": int(shots_after),
         "shots_per_match": _per_match(int(shots_after), n_matches),
         "goals_after_pressing": int(goals_after),
-        "beaten_by_possession": int(beaten_pos),
-        "beaten_by_movement": int(beaten_mov),
+        "beaten_by_possession": beaten_pos,
+        "beaten_by_movement": beaten_mov,
         "possession_danger_count": int(poss_danger),
         "danger_rate": round(int(poss_danger) / max(total_obe, 1) * 100, 1),
-        "beaten_rate": round((int(beaten_pos) + int(beaten_mov)) / max(total_obe, 1) * 100, 1),
+        "beaten_rate": round((beaten_pos + beaten_mov) / max(n_oh, 1) * 100, 1),
         "total_engagements": total_obe,
+        "opp_half_engagements": n_oh,
     }
 
 
@@ -426,41 +484,139 @@ def pressing_chain_analysis(df: pd.DataFrame, team: str, match_id: int | None = 
     }
 
 
+def collective_chain_regain_opponent_half(
+    df: pd.DataFrame,
+    team: str,
+    match_id: int | None = None,
+) -> dict:
+    """
+    Kollektif pres (pressing_chain) başına rakip yarısında top kazanımı.
+
+    Payda: Rakip yarısında (`third_start` middle/attacking) başlayan zincirler —
+    benzersiz (match_id, pressing_chain_index).
+
+    Pay: Bu zincirlere ait OBE satırlarından, yine rakip yarısında ve
+    end_type ∈ {direct_regain, indirect_regain} olanlar.
+
+    Böylece zincir kendi yarıda başlamış olsa sayılmaz; kazanım da OH içinde olmalı.
+    """
+    data = df if match_id is None else df[df["match_id"] == match_id]
+    obe = _team_obe(data, team)
+    obe_oh = _obe_opponent_half(obe)
+
+    chains_oh = obe_oh[obe_oh["pressing_chain"] == True]
+    chain_starts_oh = chains_oh[chains_oh["index_in_pressing_chain"] == 1.0]
+    if len(chain_starts_oh) == 0:
+        return {
+            "chain_regain_per_oh_chain": 0.0,
+            "chain_regain_per_oh_chain_nt": "0/0",
+            "chain_starts_opp_half": 0,
+            "collective_regains_opp_half": 0,
+        }
+
+    start_keys = chain_starts_oh[["match_id", "pressing_chain_index"]].drop_duplicates()
+    n_chains_oh = len(start_keys)
+
+    merged = obe.merge(start_keys, on=["match_id", "pressing_chain_index"], how="inner")
+    merged_oh = _obe_opponent_half(merged)
+    regain_types = {"direct_regain", "indirect_regain"}
+    regains = merged_oh[merged_oh["end_type"].isin(regain_types)]
+    n_regains = len(regains)
+
+    rate = n_regains / max(n_chains_oh, 1)
+
+    return {
+        "chain_regain_per_oh_chain": round(rate, 3),
+        "chain_regain_per_oh_chain_nt": f"{n_regains}/{n_chains_oh}",
+        "chain_starts_opp_half": int(n_chains_oh),
+        "collective_regains_opp_half": int(n_regains),
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 11. PRESSING EFFECTIVENESS SCORE
 # ─────────────────────────────────────────────────────────────────────────────
-def _percentile_rank(value: float, all_values: np.ndarray) -> float:
-    """Percentile rank of value within all_values, returned as 0-100."""
-    if len(all_values) <= 1:
-        return 50.0
-    return float(np.sum(all_values <= value) / len(all_values) * 100)
+# (raw column key, weight, higher_raw_is_better) — Twelve-style z-scores then weighted sum.
+_EFFECTIVENESS_METRIC_SPEC: tuple[tuple[str, float, bool], ...] = (
+    ("recovery_rate", 0.30, True),
+    ("long_ball_delta", 0.20, True),
+    ("xt_disruption_pct", 0.20, True),
+    ("bypass_rate", 0.10, False),
+    ("danger_rate", 0.10, False),
+    ("beaten_rate", 0.05, False),
+    ("ppda", 0.05, False),
+)
+
+
+def _z_scores_column(arr: np.ndarray, higher_is_better: bool) -> np.ndarray:
+    """Per-sample z-scores for a reference vector (μ, σ from full arr)."""
+    if len(arr) == 0:
+        return np.array([])
+    mu = float(np.mean(arr))
+    sig = float(np.std(arr, ddof=0))
+    sig = max(sig, 1e-9)
+    if higher_is_better:
+        return (arr - mu) / sig
+    return (mu - arr) / sig
+
+
+def _z_scalar(x: float, arr: np.ndarray, higher_is_better: bool) -> float:
+    if len(arr) == 0:
+        return 0.0
+    mu = float(np.mean(arr))
+    sig = max(float(np.std(arr, ddof=0)), 1e-9)
+    if higher_is_better:
+        return (x - mu) / sig
+    return (mu - x) / sig
+
+
+def _composite_z_vector(dist: dict[str, np.ndarray]) -> np.ndarray:
+    """Weighted sum of metric z-scores for each parallel row in dist (same length arrays)."""
+    first = next(iter(dist.values()), None)
+    if first is None or len(first) == 0:
+        return np.array([])
+    n = len(first)
+    total = np.zeros(n, dtype=float)
+    for key, weight, hib in _EFFECTIVENESS_METRIC_SPEC:
+        total += weight * _z_scores_column(dist[key], hib)
+    return total
 
 
 def _get_raw_components(df: pd.DataFrame, team: str, match_id: int | None = None) -> dict:
-    """Extract the 5 raw component values for the effectiveness score."""
-    rec = ball_recoveries(df, team, match_id)
-    prog = progression_filter(df, team, match_id)
+    """Raw values for effectiveness score (before z-score normalization)."""
     flb = forced_long_ball_ratio(df, team, match_id)
+    xt = xthreat_disruption(df, team, match_id)
+    byp = bypass_rate(df, team, match_id)
     cap = chances_after_pressing(df, team, match_id)
+    pp = ppda(df, team, match_id)
 
     obe = _team_obe(df if match_id is None else df[df["match_id"] == match_id], team)
-    total_obe = len(obe)
+    obe_oh = _obe_opponent_half(obe)
+    regain_types = {"direct_regain", "indirect_regain"}
+    regains_oh = obe_oh[obe_oh["end_type"].isin(regain_types)]
 
     return {
-        "recovery_rate": rec["total_regains"] / max(total_obe, 1) * 100,
-        "block_rate": prog["block_rate"],
+        "recovery_rate": len(regains_oh) / max(len(obe_oh), 1) * 100,
         "long_ball_delta": flb["long_ball_ratio_delta"],
+        "xt_disruption_pct": xt["xt_disruption_pct"],
+        "bypass_rate": byp["bypass_rate"],
         "beaten_rate": cap["beaten_rate"],
         "danger_rate": cap["danger_rate"],
+        "ppda": pp["ppda_overall"],
     }
 
 
 def _build_league_distributions(df: pd.DataFrame) -> dict[str, np.ndarray]:
-    """Compute raw component values for every team — used as percentile reference."""
+    """Compute raw component values for every team — μ, σ and Z_q reference pool."""
     teams = sorted(df["team_shortname"].dropna().unique())
     dist: dict[str, list] = {
-        "recovery_rate": [], "block_rate": [], "long_ball_delta": [],
-        "beaten_rate": [], "danger_rate": [],
+        "recovery_rate": [],
+        "long_ball_delta": [],
+        "xt_disruption_pct": [],
+        "bypass_rate": [],
+        "beaten_rate": [],
+        "danger_rate": [],
+        "ppda": [],
     }
     for team in teams:
         raw = _get_raw_components(df, team)
@@ -472,11 +628,16 @@ def _build_league_distributions(df: pd.DataFrame) -> dict[str, np.ndarray]:
 def _build_match_level_distributions(df: pd.DataFrame) -> dict[str, np.ndarray]:
     """
     One raw-component vector per (match_id, team) appearance.
-    Used to percentile-rank a single match vs all team-games in the dataset.
+    Used to build μ, σ and composite-z reference over all team-games in the dataset.
     """
     dist: dict[str, list] = {
-        "recovery_rate": [], "block_rate": [], "long_ball_delta": [],
-        "beaten_rate": [], "danger_rate": [],
+        "recovery_rate": [],
+        "long_ball_delta": [],
+        "xt_disruption_pct": [],
+        "bypass_rate": [],
+        "beaten_rate": [],
+        "danger_rate": [],
+        "ppda": [],
     }
     for mid, mdf in df.groupby("match_id", sort=False):
         mid = int(mid)
@@ -500,20 +661,16 @@ def pressing_effectiveness_score(
     match_distributions: dict[str, np.ndarray] | None = None,
 ) -> dict:
     """
-    Composite score (0-100) combining key pressing metrics.
-    Higher = more effective ("wall"), lower = more exposed ("gamble").
+    Twelve-style quality score:
 
-    Uses percentile normalization:
-    - Season view (match_id is None): rank vs all 20 teams' season aggregates.
-    - Match view (match_id set): rank vs all (match, team) samples in the data,
-      unless you pass precomputed match_distributions / league_distributions.
+    1. Per metric: z = (x−μ)/σ (or (μ−x)/σ when lower raw is better).
+    2. Z_q_raw = Σ w_m z_m with weights 0.30 / 0.20 / 0.20 / 0.10 / 0.10 / 0.05 / 0.05.
+    3. Z_q = (Z_q_raw − μ_Z) / σ_Z over all reference units (league teams or team-games).
 
-    Components (equal weight); each is percentile-normalized (0–100), higher = better:
-    - Recovery rate (regains / total engagements)
-    - Progression block rate (opponent stuck in their D3)
-    - Forced long-ball delta (from their D3, HB vs overall)
-    - Beaten (press bypass) — raw beaten_rate: lower is better; score inverts percentile
-    - Danger (under press) — raw danger_rate: lower is better; score inverts percentile
+    **z_composite** is Z_q (step 3). **z_composite_raw** is Z_q_raw (step 2).
+
+    **score** is **Z_q** (Twelve final quality score; pool mean ≈ 0, std ≈ 1).
+    **label** is a UI band on Z_q: Wall if Z_q ≥ 1, Gamble if Z_q ≤ −1, else Balanced (≈1σ).
     """
     raw = _get_raw_components(df, team, match_id)
 
@@ -526,32 +683,51 @@ def pressing_effectiveness_score(
         if dist is None:
             dist = _build_league_distributions(df)
 
-    s_recovery = _percentile_rank(raw["recovery_rate"], dist["recovery_rate"])
-    s_block = _percentile_rank(raw["block_rate"], dist["block_rate"])
-    s_long_ball = _percentile_rank(raw["long_ball_delta"], dist["long_ball_delta"])
-    s_not_beaten = 100 - _percentile_rank(raw["beaten_rate"], dist["beaten_rate"])
-    s_not_danger = 100 - _percentile_rank(raw["danger_rate"], dist["danger_rate"])
+    z_q_raw_all = _composite_z_vector(dist)
+    comp_keys = (
+        "recovery",
+        "forced_long_ball",
+        "xt_disruption",
+        "bypass",
+        "danger",
+        "beaten",
+        "ppda",
+    )
+    z_parts: dict[str, float] = {}
+    z_q_raw = 0.0
+    for (key, weight, hib), ck in zip(_EFFECTIVENESS_METRIC_SPEC, comp_keys, strict=True):
+        zv = _z_scalar(raw[key], dist[key], hib)
+        z_parts[ck] = round(zv, 2)
+        z_q_raw += weight * zv
 
-    composite = (s_recovery + s_block + s_long_ball + s_not_beaten + s_not_danger) / 5
+    if len(z_q_raw_all) > 0:
+        mu_z = float(np.mean(z_q_raw_all))
+        sig_z = max(float(np.std(z_q_raw_all, ddof=0)), 1e-9)
+        z_q = (z_q_raw - mu_z) / sig_z
+    else:
+        z_q = 0.0
 
-    label = "Wall" if composite >= 60 else "Balanced" if composite >= 40 else "Gamble"
+    if z_q >= 1.0:
+        label = "Wall"
+    elif z_q <= -1.0:
+        label = "Gamble"
+    else:
+        label = "Balanced"
 
     return {
-        "score": round(composite, 1),
+        "score": round(z_q, 3),
         "label": label,
-        "components": {
-            "recovery": round(s_recovery, 1),
-            "block": round(s_block, 1),
-            "forced_long_ball": round(s_long_ball, 1),
-            "not_beaten": round(s_not_beaten, 1),
-            "not_danger": round(s_not_danger, 1),
-        },
+        "z_composite_raw": round(z_q_raw, 3),
+        "z_composite": round(z_q, 3),
+        "components": z_parts,
         "raw": {
             "recovery_rate": round(raw["recovery_rate"], 1),
-            "block_rate": raw["block_rate"],
             "long_ball_delta": raw["long_ball_delta"],
+            "xt_disruption_pct": raw["xt_disruption_pct"],
+            "bypass_rate": raw["bypass_rate"],
             "beaten_rate": raw["beaten_rate"],
             "danger_rate": raw["danger_rate"],
+            "ppda": raw["ppda"],
         },
     }
 
@@ -573,6 +749,8 @@ def league_pressing_table(
     for team in teams:
         rec = ball_recoveries(df, team)
         flb = forced_long_ball_ratio(df, team)
+
+        fls = forced_long_ball_strict(df, team)
         prog = progression_filter(df, team)
         byp = bypass_rate(df, team)
         ppda_val = ppda(df, team)
@@ -581,18 +759,32 @@ def league_pressing_table(
         cap = chances_after_pressing(df, team)
         cfr = chances_from_recovery(df, team)
         pca = pressing_chain_analysis(df, team)
+        ccr = collective_chain_regain_opponent_half(df, team)
         pes = pressing_effectiveness_score(df, team, league_distributions=league_distributions)
+        comp = pes["components"]
+        rawp = pes["raw"]
 
         rows.append({
             "team": team,
             "matches": rec["n_matches"],
             "effectiveness_score": pes["score"],
+            "z_q_raw": pes["z_composite_raw"],
             "effectiveness_label": pes["label"],
+            "recovery_rate": rawp["recovery_rate"],
+            "z_recovery": comp["recovery"],
+            "z_forced_long_ball": comp["forced_long_ball"],
+            "z_xt_disruption": comp["xt_disruption"],
+            "z_bypass": comp["bypass"],
+            "z_danger": comp["danger"],
+            "z_beaten": comp["beaten"],
+            "z_ppda": comp["ppda"],
             "regains_per_match": rec["regains_per_match"],
             "regains_att_third": rec["regains_attacking_third"],
             "chain_regains": rec["chain_regains"],
             "forced_long_pct": flb["long_ball_ratio_high_block"],
             "forced_long_delta": flb["long_ball_ratio_delta"],
+            "strict_long_hb_lowopt_rate": fls["strict_long_hb_lowopt_rate"],
+            "strict_long_hb_lowopt_nt": fls["strict_long_hb_lowopt_nt"],
             "forced_backward": flb["forced_backward"],
             "block_rate": prog["block_rate"],
             "bypass_rate": byp["bypass_rate"],
@@ -609,57 +801,93 @@ def league_pressing_table(
             "xshot_per_regain": cfr["xshot_after_regain_per_regain"],
             "chains_per_match": pca["chains_per_match"],
             "avg_chain_length": pca["avg_chain_length"],
+            "chain_regain_per_oh_chain": ccr["chain_regain_per_oh_chain"],
+            "chain_regain_per_oh_chain_nt": ccr["chain_regain_per_oh_chain_nt"],
         })
 
     return pd.DataFrame(rows).sort_values("effectiveness_score", ascending=False).reset_index(drop=True)
 
 
-def pressing_derived_bundle(
+def pressing_league_bundle(
     df: pd.DataFrame,
     data_dir: Path,
     source_path: Path,
     schema: int,
-) -> tuple[pd.DataFrame, dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """League table + league/match distributions; disk-backed when source parquet unchanged."""
-    meta_fp = data_dir / "_pressing_derived.meta.json"
-    tbl_fp = data_dir / "_pressing_derived_league_table.parquet"
-    ld_fp = data_dir / "_pressing_derived_league_dist.pkl"
-    md_fp = data_dir / "_pressing_derived_match_dist.pkl"
+) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """League table + league distributions only (fast path for League Overview)."""
+    meta_fp = data_dir / "_pressing_league.meta.json"
+    tbl_fp = data_dir / "_pressing_league_table.parquet"
+    ld_fp = data_dir / "_pressing_league_dist.pkl"
 
     try:
         mtime = float(source_path.stat().st_mtime)
     except OSError:
         mtime = 0.0
 
-    if meta_fp.exists() and tbl_fp.exists() and ld_fp.exists() and md_fp.exists():
+    if meta_fp.exists() and tbl_fp.exists() and ld_fp.exists():
         with open(meta_fp, encoding="utf-8") as fh:
             meta = json.load(fh)
         if meta.get("mtime") == mtime and meta.get("schema") == schema:
             table = pd.read_parquet(tbl_fp)
             with open(ld_fp, "rb") as fh:
                 league_dist = pickle.load(fh)
-            with open(md_fp, "rb") as fh:
-                match_dist = pickle.load(fh)
-            return table, league_dist, match_dist
+            return table, league_dist
 
     league_dist = _build_league_distributions(df)
     table = league_pressing_table(df, league_distributions=league_dist)
-    match_dist = _build_match_level_distributions(df)
 
     data_dir.mkdir(parents=True, exist_ok=True)
     table.to_parquet(tbl_fp, index=False)
     with open(ld_fp, "wb") as fh:
         pickle.dump(league_dist, fh, protocol=4)
+    with open(meta_fp, "w", encoding="utf-8") as fh:
+        json.dump({"mtime": mtime, "schema": schema}, fh)
+
+    return table, league_dist
+
+
+def pressing_match_distributions_bundle(
+    df: pd.DataFrame,
+    data_dir: Path,
+    source_path: Path,
+    schema: int,
+) -> dict[str, np.ndarray]:
+    """
+    Match-level percentile reference (~760 team-games). Built only when Match Analysis
+    needs it — not on initial league load.
+    """
+    meta_fp = data_dir / "_pressing_match.meta.json"
+    md_fp = data_dir / "_pressing_match_dist.pkl"
+
+    try:
+        mtime = float(source_path.stat().st_mtime)
+    except OSError:
+        mtime = 0.0
+
+    if meta_fp.exists() and md_fp.exists():
+        with open(meta_fp, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        if meta.get("mtime") == mtime and meta.get("schema") == schema:
+            with open(md_fp, "rb") as fh:
+                return pickle.load(fh)
+
+    match_dist = _build_match_level_distributions(df)
+
+    data_dir.mkdir(parents=True, exist_ok=True)
     with open(md_fp, "wb") as fh:
         pickle.dump(match_dist, fh, protocol=4)
     with open(meta_fp, "w", encoding="utf-8") as fh:
         json.dump({"mtime": mtime, "schema": schema}, fh)
 
-    return table, league_dist, match_dist
+    return match_dist
 
 
 def player_pressing_stats(df: pd.DataFrame, team: str) -> pd.DataFrame:
-    """Per-player pressing statistics for a given team."""
+    """Per-player pressing statistics for a given team.
+
+    beaten_by_* counts and beaten_rate use only engagements in the opponent half
+    (third_start in middle_third or attacking_third), consistent with chances_after_pressing.
+    """
     obe = _team_obe(df, team)
     if len(obe) == 0:
         return pd.DataFrame()
@@ -686,8 +914,6 @@ def player_pressing_stats(df: pd.DataFrame, team: str) -> pd.DataFrame:
         other_count=("event_subtype", lambda x: (x == "other").sum()),
         regains=("end_type", lambda x: x.isin({"direct_regain", "indirect_regain"}).sum()),
         force_backward=("force_backward", "sum"),
-        beaten_by_possession=("beaten_by_possession", "sum"),
-        beaten_by_movement=("beaten_by_movement", "sum"),
         stop_danger=("stop_possession_danger", "sum"),
         reduce_danger=("reduce_possession_danger", "sum"),
         in_chain=("pressing_chain", "sum"),
@@ -698,12 +924,36 @@ def player_pressing_stats(df: pd.DataFrame, team: str) -> pd.DataFrame:
         avg_distance=("distance_covered", "mean"),
     ).reset_index()
 
+    obe_oh = _obe_opponent_half(obe)
+    if len(obe_oh) > 0:
+        oh = obe_oh.groupby(["player_name", "player_position"]).agg(
+            opp_half_engagements=("event_id", "count"),
+            beaten_by_possession=("beaten_by_possession", "sum"),
+            beaten_by_movement=("beaten_by_movement", "sum"),
+        ).reset_index()
+    else:
+        oh = pd.DataFrame(
+            columns=[
+                "player_name",
+                "player_position",
+                "opp_half_engagements",
+                "beaten_by_possession",
+                "beaten_by_movement",
+            ]
+        )
+
+    stats = stats.merge(oh, on=["player_name", "player_position"], how="left")
+    stats["opp_half_engagements"] = stats["opp_half_engagements"].fillna(0).astype(int)
+    stats["beaten_by_possession"] = stats["beaten_by_possession"].fillna(0).astype(int)
+    stats["beaten_by_movement"] = stats["beaten_by_movement"].fillna(0).astype(int)
+
+    den = stats["opp_half_engagements"].to_numpy()
+    num = (stats["beaten_by_possession"] + stats["beaten_by_movement"]).to_numpy()
+    stats["beaten_rate"] = np.where(den > 0, num / den * 100, 0.0)
+    stats["beaten_rate"] = stats["beaten_rate"].round(1)
+
     stats["engagements_per_match"] = (stats["total_engagements"] / stats["matches"]).round(1)
     stats["regain_rate"] = (stats["regains"] / stats["total_engagements"] * 100).round(1)
-    stats["beaten_rate"] = (
-        (stats["beaten_by_possession"] + stats["beaten_by_movement"])
-        / stats["total_engagements"] * 100
-    ).round(1)
     stats["xshot_from_regain"] = stats["xshot_from_regain"].round(2)
 
     return stats.sort_values("total_engagements", ascending=False).reset_index(drop=True)

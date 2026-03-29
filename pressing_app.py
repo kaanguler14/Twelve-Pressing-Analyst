@@ -19,7 +19,8 @@ from pressing_metrics import (
     chances_after_pressing,
     chances_from_recovery,
     forced_long_ball_ratio,
-    pressing_derived_bundle,
+    pressing_league_bundle,
+    pressing_match_distributions_bundle,
     opponent_pass_completion,
     player_pressing_stats,
     ppda,
@@ -28,6 +29,31 @@ from pressing_metrics import (
     progression_filter,
     xthreat_disruption,
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Twelve adım 1 (lig havuzu): z = (x−μ)/σ veya düşük-iyi için (μ−x)/σ ; σ popülasyon (ddof=0).
+# ─────────────────────────────────────────────────────────────────────────────
+def _twelve_style_z(series: pd.Series, *, higher_is_better: bool) -> pd.Series:
+    mu = float(series.mean())
+    sig = max(float(series.std(ddof=0)), 1e-9)
+    if higher_is_better:
+        return (series - mu) / sig
+    return (mu - series) / sig
+
+
+# Twelve "Link To Data" slaytı; ters metrikler: bypass, danger, beaten (düşük ham = iyi → z=(μ−x)/σ).
+_SUMMARY_WEIGHTS: dict[str, float] = {
+    "ppda (hb)": 0.10,
+    "block %": 0.10,
+    "opp pass % (d3,hb)": 0.10,
+    "force long ball": 0.15,
+    "xt disruption": 0.15,
+    "bypass %": 0.10,
+    "danger": 0.10,
+    "beaten": 0.05,
+    "regains/match": 0.15,
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -88,25 +114,31 @@ def build_match_index(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # Bump when league_pressing_table / distributions logic or columns change (invalidates disk + @st.cache_data).
-_CACHE_SCHEMA = 4
+_CACHE_SCHEMA = 17
 
 
 @st.cache_data(show_spinner=False)
-def _pressing_derived(df: pd.DataFrame, *, _schema: int = _CACHE_SCHEMA):
+def _pressing_league_derived(df: pd.DataFrame, *, _schema: int = _CACHE_SCHEMA):
     _ = _schema
-    return pressing_derived_bundle(df, DATA_DIR, CACHE_FILE, _schema)
+    return pressing_league_bundle(df, DATA_DIR, CACHE_FILE, _schema)
+
+
+@st.cache_data(show_spinner=False)
+def _pressing_match_derived(df: pd.DataFrame, *, _schema: int = _CACHE_SCHEMA):
+    _ = _schema
+    return pressing_match_distributions_bundle(df, DATA_DIR, CACHE_FILE, _schema)
 
 
 def get_league_table(df: pd.DataFrame, *, _schema: int = _CACHE_SCHEMA) -> pd.DataFrame:
-    return _pressing_derived(df, _schema=_schema)[0]
+    return _pressing_league_derived(df, _schema=_schema)[0]
 
 
 def get_league_distributions(df: pd.DataFrame, *, _schema: int = _CACHE_SCHEMA) -> dict:
-    return _pressing_derived(df, _schema=_schema)[1]
+    return _pressing_league_derived(df, _schema=_schema)[1]
 
 
 def get_match_distributions(df: pd.DataFrame, *, _schema: int = _CACHE_SCHEMA) -> dict:
-    return _pressing_derived(df, _schema=_schema)[2]
+    return _pressing_match_derived(df, _schema=_schema)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,12 +183,9 @@ OBE_COLORS = {
 # ─────────────────────────────────────────────────────────────────────────────
 HELP = {
     "effectiveness_score": (
-        "A single score (0–100) using percentile normalization. "
-        "League view: each component is ranked vs all 20 teams' season totals. "
-        "Match view: ranked vs every team-appearance in the dataset (~760 games). "
-        "Includes how often the press is **beaten** (bypassed) and how much **danger** "
-        "the opponent creates in pressing situations — both scored so higher = better (rarer / safer). "
-        "60+ = 'Wall', 40–59 = 'Balanced', below 40 = 'Gamble'."
+        "Twelve ‘Calculating qualities’: metric z-scores, Z_q_raw = Σw·z, then "
+        "Z_q = (Z_q_raw−μ_Z)/σ_Z. **Score / Z_q** is that final value (pool ~N(0,1)). "
+        "Wall / Balanced / Gamble = |Z_q|≥1 vs inside (UI only). Radar = per-metric z."
     ),
     "regains": (
         "How many times the team won the ball back as a direct result of pressing. "
@@ -206,9 +235,9 @@ HELP = {
         "The opponent wanted to go forward but the pressure made them retreat."
     ),
     "beaten_rate": (
-        "**Press break (beaten):** how often the press is bypassed — the ball carrier dribbles past the presser, "
-        "or an opponent’s off-ball run takes the presser out of the play. "
-        "This is the frequency of the press being ‘broken’ in a duel. Lower = more solid pressing."
+        "**Press break (beaten):** share of **opponent-half** OBEs (middle + attacking third) where the press is "
+        "bypassed — dribble past or beaten by movement. Own defensive-third presses are excluded from this rate. "
+        "Lower = more solid high/mid pressing."
     ),
     "danger_rate": (
         "**Danger during / after press breaks down:** how often, while you are pressing, the opponent’s "
@@ -216,12 +245,10 @@ HELP = {
         "Lower = less danger conceded from pressing situations."
     ),
     "radar_beaten_component": (
-        "Composite sub-score (0–100): how rarely your press is **beaten** vs the reference group "
-        "(league teams or all team-games). Higher = fewer bypasses per engagement than peers."
+        "**z-score** for opponent-half beaten rate (inverted: lower raw beaten → higher z). "
     ),
     "radar_danger_component": (
-        "Composite sub-score (0–100): how rarely **danger** (EPV spike) happens during your pressing "
-        "vs the reference group. Higher = you limit threat when the press is under strain."
+        "**z-score** for danger rate under press (inverted). Higher z = less danger vs pool mean."
     ),
     "shots_after": (
         "How many times the opponent shot within 10 seconds after a pressing action where we did NOT win the ball. "
@@ -289,15 +316,15 @@ def page_league_overview():
         table = get_league_table(df)
 
     # ── Top KPIs ──
-    avg_score = table["effectiveness_score"].mean()
+    avg_zq = table["effectiveness_score"].mean()
     best = table.iloc[0]
     worst = table.iloc[-1]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("League Avg. Score", f"{avg_score:.0f}/100", help=HELP["effectiveness_score"])
-    c2.metric("Most Effective", f"{best['team']} ({best['effectiveness_score']:.0f})",
-              help="Team with the highest Pressing Effectiveness Score.")
-    c3.metric("Least Effective", f"{worst['team']} ({worst['effectiveness_score']:.0f})",
-              help="Team with the lowest Pressing Effectiveness Score.")
+    c1.metric("League avg. Z_q", f"{avg_zq:+.2f}", help=HELP["effectiveness_score"])
+    c2.metric("Most effective", f"{best['team']}", delta=f"Z_q {float(best['effectiveness_score']):+.2f}",
+              help="Highest Twelve Z_q in the league.")
+    c3.metric("Least effective", f"{worst['team']}", delta=f"Z_q {float(worst['effectiveness_score']):+.2f}",
+              help="Lowest Twelve Z_q in the league.")
     c4.metric("Avg. PPDA", f"{table['ppda'].mean():.2f}", help=HELP["ppda"])
 
     st.divider()
@@ -305,7 +332,7 @@ def page_league_overview():
     # ── Effectiveness bar chart ──
     c1, c2 = st.columns([3, 2])
     with c1:
-        st.subheader("Pressing Effectiveness Score")
+        st.subheader("Twelve Z_q (final quality score)")
         t_sorted = table.sort_values("effectiveness_score", ascending=True)
         colors = t_sorted["effectiveness_label"].map(
             {"Wall": "#2ecc71", "Balanced": "#f39c12", "Gamble": "#e74c3c"}
@@ -317,7 +344,7 @@ def page_league_overview():
             textposition="inside",
         ))
         fig.update_layout(height=550, margin=dict(t=10, b=10, l=10, r=10),
-                          xaxis_title="Score (0-100)", yaxis_title="")
+                          xaxis_title="Z_q", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
@@ -329,12 +356,22 @@ def page_league_overview():
 
         categories = [
             "Recovery",
-            "Progression\nBlock",
             "Forced\nLong Ball",
-            "Beaten\n(press bypass)",
-            "Danger\n(under press)",
+            "xT\nDisruption",
+            "Bypass",
+            "Danger",
+            "Beaten",
+            "PPDA",
         ]
-        values = [comp["recovery"], comp["block"], comp["forced_long_ball"], comp["not_beaten"], comp["not_danger"]]
+        values = [
+            comp["recovery"],
+            comp["forced_long_ball"],
+            comp["xt_disruption"],
+            comp["bypass"],
+            comp["danger"],
+            comp["beaten"],
+            comp["ppda"],
+        ]
 
         fig = go.Figure(go.Scatterpolar(
             r=values + [values[0]],
@@ -344,17 +381,16 @@ def page_league_overview():
             line_color="#2ecc71",
         ))
         fig.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            polar=dict(radialaxis=dict(visible=True, range=[-2.5, 2.5])),
             height=400, margin=dict(t=30, b=30),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True)
         st.caption(
-            "**Beaten** = how often the press is bypassed (dribble / run); **Danger** = how often the opponent’s "
-            "threat jumps during a press. On this chart, **higher** on those axes = you limit breaks and danger "
-            "**more** than the comparison set (percentile-based)."
+            "Spokes are **z-scores** (higher = better vs the league pool). "
+            "Bypass, danger, beaten, PPDA use inverted z so lower raw rates → higher z."
         )
-        st.metric("Composite Score", f"{pes['score']:.0f}/100", delta=pes["label"],
+        st.metric("Z_q (Twelve)", f"{pes['score']:+.3f}", delta=pes["label"],
                   help=HELP["effectiveness_score"])
 
     st.divider()
@@ -364,25 +400,17 @@ def page_league_overview():
 
     with st.expander("ℹ️ How are table columns calculated?"):
         st.markdown("""
-**Score** — *Overall pressing effectiveness (0–100)*
+**Twelve quality pipeline** (twelve¹² “Calculating qualities”)
 
-A single number that summarizes how good a team's pressing is. It combines five components with equal weight:
-1. **Recovery** — how often pressing wins the ball back
-2. **Block** — how often the opponent is trapped in their own third
-3. **Forced Long Ball** — how much pressing shifts pass length (long-ball delta from their D3)
-4. **Beaten (press bypass)** — how often the press is broken (dribble past or beaten by movement); score reflects how **rare** that is vs peers
-5. **Danger (under press)** — how often the opponent’s threat spikes while you press; score reflects how **rare** that danger is vs peers
+1. Each metric: **Z = (x−μ)/σ** (or **(μ−x)/σ** when lower raw is better). Population σ, **ddof=0**.
+2. **Z_q_raw** = **0.30·Z_rec + 0.20·Z_FL + 0.20·Z_xT + 0.10·Z_byp + 0.10·Z_dang + 0.05·Z_beat + 0.05·Z_PPDA**
+3. **Z_q** = **(Z_q_raw − μ_Z) / σ_Z** over all teams (league) or all team-games (match).
 
-Each component is scored using **percentile normalization**. In the **league table**, each team's season-long raw value is ranked against the other 19 teams (20 values per metric). On the **match analysis** page, each metric is ranked against all team-games in the season (~760 samples) so a single game is compared to other games, not to full-season aggregates. The final score is the average of all five component percentiles. **60+** = "Wall", **40–59** = "Balanced", **<40** = "Gamble".
+**Score** column = **Z_q** (final quality score; pool mean ≈ 0, std ≈ 1).
 
-> **Data source:** Uses five SkillCorner metrics combined:
-> - Recovery score: percentile rank of (regain count / total OBE) among all teams. From **end_type** = "direct_regain" or "indirect_regain" on OBE events.
-> - Block score: percentile rank of block rate among all teams. From **third_start** and **third_end** on opponent PP.
-> - Forced Long Ball score: percentile rank of long-ball delta among all teams. From **pass_range** = "long" ratio difference between **team_out_of_possession_phase_type** = "high_block" and overall.
-> - **Beaten** component: **inverted** percentile of bypass rate — “how often is the press broken?” Lower raw beaten % → higher wedge. From **beaten_by_possession** and **beaten_by_movement** on OBE.
-> - **Danger** component: **inverted** percentile of danger rate — “how often does pressing leave us exposed?” Lower raw danger % → higher wedge. From **possession_danger** on OBE.
->
-> Formula: **(Recovery pct + Block pct + Forced LB pct + (100 − Beaten pct) + (100 − Danger pct)) / 5** where the last two use percentile ranks of the raw rates
+**Z_q raw** column = **Z_q_raw** (weighted sum of metric z-scores before step 3).
+
+**Labels (UI only):** **Wall** if Z_q **≥ 1**, **Gamble** if Z_q **≤ −1**, else **Balanced** (~1σ bands).
 
 ---
 
@@ -462,13 +490,13 @@ When we press high and the opponent tries to pass from their own defensive third
 
 ---
 
-**Beaten %** — *How often the press is broken (bypassed)*
+**Beaten %** — *How often the press is broken (bypassed) in the opponent half*
 
-When a pressing player engages the ball carrier, this measures how often the press is **beaten** — either by the ball carrier dribbling past them ("beaten by possession") or by a teammate making a run that the presser can't track ("beaten by movement"). Think: **frequency of the press failing in a duel**. A **lower** percentage means a more solid press.
+Only OBE rows with **third_start** in the pressing team’s **middle** or **attacking** third (opponent half) count. Low-block / own-half duels are excluded so the rate reflects high pressing quality.
 
-> **Data source:** From all OBE events by our team, sums the boolean columns **beaten_by_possession** (ball carrier dribbled past the presser) and **beaten_by_movement** (opponent's off-ball run bypassed the presser between the final pass and reception).
+> **Data source:** **beaten_by_possession** and **beaten_by_movement** on those OBE rows only.
 >
-> Formula: **(beaten_by_possession + beaten_by_movement) / total OBE count × 100**
+> Formula: **(beaten_by_possession + beaten_by_movement) / opponent-half OBE count × 100**
 
 ---
 
@@ -511,10 +539,20 @@ A "pressing chain" is when two or more players press the opponent in rapid succe
 
     display_cols = {
         "team": "Team",
-        "effectiveness_score": "Score",
+        "effectiveness_score": "Z_q",
+        "z_q_raw": "Z_q raw",
         "effectiveness_label": "Label",
+        "recovery_rate": "Recovery % (opp. half)",
+        "z_recovery": "z Recovery",
+        "z_forced_long_ball": "z Forced LB",
+        "z_xt_disruption": "z xT Disr.",
+        "z_bypass": "z Bypass",
+        "z_danger": "z Danger",
+        "z_beaten": "z Beaten",
+        "z_ppda": "z PPDA",
         "regains_per_match": "Regains/Match",
         "forced_long_delta": "Long Ball Delta",
+        "strict_long_hb_lowopt_rate": "HB low-opt long / D3 long",
         "block_rate": "Block %",
         "bypass_rate": "Bypass %",
         "ppda": "PPDA",
@@ -527,10 +565,73 @@ A "pressing chain" is when two or more players press the opponent in rapid succe
         "xshot_after_regain_pm": "xShot/Regain/M",
         "xshot_per_regain": "xShot/Regain",
         "chains_per_match": "Chains/Match",
+        "chain_regain_per_oh_chain": "Regain / chain (opp. half)",
     }
     cols_ok = [k for k in display_cols if k in table.columns]
     display_df = table[cols_ok].rename(columns={k: display_cols[k] for k in cols_ok})
     st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        label="Download table as CSV",
+        data=display_df.to_csv(index=False).encode("utf-8"),
+        file_name="pressing_league_table.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("Özet metrik tablosu (Twelve z — Link To Data)")
+    st.caption(
+        "Etkili pres↔PPDA(HB); momentum↔Block % & Opp Pass%(D3,HB); uzun zorlama↔Force long; "
+        "build-up/tehdit↔xT disruption; duvar↔Bypass (ters); güvenlik↔Danger & Beaten (ters); "
+        "kazanım↔Regains/Match. z_q_raw=Σw·z; score=(z_q_raw−μ)/σ."
+    )
+    t = table
+    z_ppda_hb = _twelve_style_z(t["ppda_high_block"], higher_is_better=False)
+    z_block = _twelve_style_z(t["block_rate"], higher_is_better=True)
+    z_opp_pass = _twelve_style_z(t["opp_pass_pct_d3_hb"], higher_is_better=False)
+    z_flb = _twelve_style_z(t["strict_long_hb_lowopt_rate"], higher_is_better=True)
+    z_xt = t["z_xt_disruption"]
+    z_bypass = _twelve_style_z(t["bypass_rate"], higher_is_better=False)
+    z_danger = t["z_danger"]
+    z_beaten = t["z_beaten"]
+    z_regains_pm = _twelve_style_z(t["regains_per_match"], higher_is_better=True)
+
+    z_q_raw = (
+        _SUMMARY_WEIGHTS["ppda (hb)"] * z_ppda_hb
+        + _SUMMARY_WEIGHTS["block %"] * z_block
+        + _SUMMARY_WEIGHTS["opp pass % (d3,hb)"] * z_opp_pass
+        + _SUMMARY_WEIGHTS["force long ball"] * z_flb
+        + _SUMMARY_WEIGHTS["xt disruption"] * z_xt
+        + _SUMMARY_WEIGHTS["bypass %"] * z_bypass
+        + _SUMMARY_WEIGHTS["danger"] * z_danger
+        + _SUMMARY_WEIGHTS["beaten"] * z_beaten
+        + _SUMMARY_WEIGHTS["regains/match"] * z_regains_pm
+    )
+    sig_z = max(float(z_q_raw.std(ddof=0)), 1e-9)
+    score = (z_q_raw - float(z_q_raw.mean())) / sig_z
+
+    summary_df = pd.DataFrame({
+        "team": t["team"],
+        "ppda (hb)": z_ppda_hb,
+        "block %": z_block,
+        "opp pass % (d3,hb)": z_opp_pass,
+        "force long ball": z_flb,
+        "xt disruption": z_xt,
+        "bypass %": z_bypass,
+        "danger": z_danger,
+        "beaten": z_beaten,
+        "regains/match": z_regains_pm,
+        "z_q_raw": z_q_raw,
+        "score": score,
+    }).round(3)
+    summary_df = summary_df.sort_values("score", ascending=False, ignore_index=True)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        label="Download summary table as CSV",
+        data=summary_df.to_csv(index=False).encode("utf-8"),
+        file_name="pressing_summary_metrics.csv",
+        mime="text/csv",
+        key="download_summary_csv",
+    )
 
     st.divider()
 
@@ -541,7 +642,10 @@ A "pressing chain" is when two or more players press the opponent in rapid succe
         fig = px.scatter(table, x="ppda", y="effectiveness_score",
                          text="team", color="effectiveness_label",
                          color_discrete_map={"Wall": "#2ecc71", "Balanced": "#f39c12", "Gamble": "#e74c3c"},
-                         labels={"ppda": "PPDA (lower = more intense)", "effectiveness_score": "Score"})
+                         labels={
+                             "ppda": "PPDA (lower = more intense)",
+                             "effectiveness_score": "Z_q",
+                         })
         fig.update_traces(textposition="top center", marker_size=12)
         fig.update_layout(height=400, margin=dict(t=30, b=10), showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
@@ -599,35 +703,33 @@ def page_match_analysis():
 
     # ── Overall score header ──
     c1, c2, c3 = st.columns([1, 1, 2])
-    c1.metric("Pressing Score", f"{pes['score']:.0f}/100", delta=pes["label"],
+    c1.metric("Z_q (Twelve)", f"{pes['score']:+.3f}", delta=pes["label"],
               help=HELP["effectiveness_score"])
-    st.caption(
-        "Score uses **percentiles vs all team-games** in the season (this match vs ~760 samples), "
-        "not vs full-season team averages."
-    )
+    st.caption("Z_q = z-score of Z_q_raw vs all team-games in the season (~760).")
     c2.metric("PPDA", ppda_val["ppda_overall"], help=HELP["ppda"])
 
     with c3:
         comp = pes["components"]
         categories = [
-            "Recovery", "Block", "Forced LB",
-            "Beaten\n(press bypass)", "Danger\n(under press)",
+            "Recovery", "Forced LB", "xT Disr.",
+            "Bypass", "Danger", "Beaten", "PPDA",
         ]
-        values = [comp["recovery"], comp["block"], comp["forced_long_ball"],
-                  comp["not_beaten"], comp["not_danger"]]
+        values = [
+            comp["recovery"], comp["forced_long_ball"], comp["xt_disruption"],
+            comp["bypass"], comp["danger"], comp["beaten"], comp["ppda"],
+        ]
         fig = go.Figure(go.Scatterpolar(
             r=values + [values[0]],
             theta=categories + [categories[0]],
             fill="toself", fillcolor="rgba(46,204,113,0.3)", line_color="#2ecc71",
         ))
         fig.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            polar=dict(radialaxis=dict(visible=True, range=[-2.5, 2.5])),
             height=250, margin=dict(t=20, b=20, l=40, r=40), showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True)
         st.caption(
-            "**Beaten** = press bypass frequency; **Danger** = threat spikes while pressing. "
-            "Higher wedges = you do **better** than the season’s team-game distribution (rarer breaks / less danger)."
+            "Metric z-scores (step 1). Headline Z_q is step 3 (Twelve). Axis ±2.5 typical."
         )
 
     st.divider()
@@ -866,7 +968,16 @@ def page_match_analysis():
 
         with col2:
             st.markdown("**Risk Assessment**")
-            risk_score = pes["components"]["not_beaten"] * 0.5 + pes["components"]["not_danger"] * 0.5
+            risk_score = max(
+                0.0,
+                min(
+                    100.0,
+                    50.0
+                    + 12.5
+                    * (pes["components"]["beaten"] + pes["components"]["danger"])
+                    / 2.0,
+                ),
+            )
             if risk_score >= 70:
                 verdict = "Low risk — pressing is secure, opponent rarely creates danger."
                 color = "green"
@@ -1109,7 +1220,7 @@ Every stat below comes from **pressing engagements** — moments where a defende
 
 **Forced Back** — How many times the player's pressing forced the opponent to play a backward pass instead of progressing forward.
 
-**Beaten %** — How often the player gets bypassed during pressing — either the ball carrier dribbles past them, or an opponent's movement takes them out of the play. Lower = better.
+**Beaten %** — Among this player’s **opponent-half** OBEs only (middle + attacking third), how often they are bypassed (possession or movement). Lower = better high pressing.
 
 **Chain** — How many of the player's pressing actions were part of a collective chain (coordinated pressing with teammates).
 
@@ -1159,7 +1270,7 @@ with st.sidebar:
     4. Is the opponent creating chances?
     5. Are we creating chances?
 
-    **Effectiveness score** also tracks **beaten** (how often the press is bypassed) and **danger** (threat while pressing); higher = rarer / safer vs peers.
+    **Twelve Z_q** combines metric z-scores (incl. opponent-half **beaten** and **danger**); higher Z_q = better vs pool average.
     """)
     st.divider()
     st.caption("378 matches | 20 teams | 143 columns")

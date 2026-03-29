@@ -1,8 +1,15 @@
 # Pressing Analyst - Metrik Dokumantasyonu
 
+**Teknik spesifikasyon (formül, veri sözleşmesi, Z_q eşlemesi, PDF için):**  
+[`PRESSING_METRICS_SPECIFICATION.md`](PRESSING_METRICS_SPECIFICATION.md)
+
 ## Genel Bakis
 
 Bu dokuman, Pressing Analyst uygulamasinda kullanilan her bir metrigin nasil hesaplandigi, hangi SkillCorner Dynamic Events sutunlarini kullandigi ve ne anlama geldigi hakkinda detayli bilgi verir.
+
+### Özet tablo (Link To Data — slayt eşlemesi)
+
+Lig ekranındaki özet skor tablosu; **Twelve** slaytındaki tanım–veri eşlemesine göre: PPDA(HB), Block %, Opp Pass%(D3,HB), Force long ball, xT disruption, Bypass (ters), Danger (ters), Beaten (ters), Regains/Match. **z_q_raw** = ağırlıklı z toplamı; **score** = lig içinde normalize.
 
 ### Terminoloji
 
@@ -147,6 +154,20 @@ long_ball_ratio_delta = long_ball_ratio_high_block - long_ball_ratio_overall
 | `long_ball_ratio_high_block` | High block sirasinda uzun pas orani (%) |
 | `long_ball_ratio_delta` | Fark (pozitif = pressing uzun pasi artirmis) |
 | `forced_backward` | OBE'lerden geri pas zorlatma sayisi |
+
+### Strict uzun pas (opsiyon proxy; lig tablosu — tek oran)
+
+Ham veride PO bazli `is_available` yok; `n_passing_options` ≤ **M** (`FORCED_LONG_STRICT_MAX_PASSING_OPTIONS`, varsayilan M=1) **düşük opsiyon** proxy’si.
+
+**Pay:** Rakibin D3'ten attigi uzun pas (`third_start == defensive_third`, `end_type == pass`, `pass_range == long`) satirlarindan hem `team_out_of_possession_phase_type == high_block` hem `n_passing_options` ≤ M olanlar.
+
+**Payda:** Rakibin D3'ten attigi **tum** uzun pas sayisi (faz fark etmeksizin).
+
+```
+strict_long_hb_lowopt_rate = (HB ∧ dusuk-opt ∧ D3 uzun) / (rakibin tum D3 uzun paslari)
+```
+
+Lig tablosu sutunu: `strict_long_hb_lowopt_rate` (0–1). Ham sayim `strict_long_hb_lowopt_nt` = "pay/payda" (CSV’de opsiyonel sutun olarak kalabilir; UI’da yalnizca oran gosterilebilir).
 
 ### Yorum
 - `delta > 0` ise pressing rakibi uzun pas atmaya zorluyor (iyi)
@@ -416,6 +437,7 @@ Pressingin ne kadar risk tasidigini olcer. Press kirildiginda rakibin sut, gol v
 | `team_shortname` | OBE | Bizim takim |
 | `lead_to_shot` | OBE | 10 sn icinde sut oldu mu? (True/False) |
 | `lead_to_goal` | OBE | 10 sn icinde gol oldu mu? (True/False) |
+| `third_start` | OBE | Rakip yarisi filtresi: `middle_third` / `attacking_third` (beaten icin) |
 | `beaten_by_possession` | OBE | Savunmaci top sahibi tarafindan gecildi mi? |
 | `beaten_by_movement` | OBE | Savunmaci hareket ile gecildi mi? (pas almadan once) |
 | `possession_danger` | OBE | Rakibin EPV'si %3'un uzerine cikti mi? |
@@ -431,20 +453,20 @@ Pressingin ne kadar risk tasidigini olcer. Press kirildiginda rakibin sut, gol v
 
 ```
 1. Bizim takimin tum OBE'lerini al
-2. lead_to_shot == True olanlari say → shots_after
+2. lead_to_shot == True olanlari say → shots_after (tum OBE)
 3. lead_to_goal == True olanlari say → goals_after
-4. beaten_by_possession == True olanlari say → beaten_pos
-5. beaten_by_movement == True olanlari say → beaten_mov
-6. possession_danger == True olanlari say → poss_danger
+4. Rakip yarisi: third_start in {middle_third, attacking_third} olan OBE alt kumesi → obe_oh
+5. obe_oh uzerinde beaten_by_possession / beaten_by_movement toplamlari → beaten_pos, beaten_mov
+6. possession_danger == True olanlari say → poss_danger (tum OBE)
 7. danger_rate = poss_danger / total_obe * 100
-8. beaten_rate = (beaten_pos + beaten_mov) / total_obe * 100
+8. beaten_rate = (beaten_pos + beaten_mov) / len(obe_oh) * 100
 ```
 
 ### Formul
 
 ```
 danger_rate = (possession_danger True sayisi / toplam OBE) * 100
-beaten_rate = ((beaten_by_possession + beaten_by_movement) / toplam OBE) * 100
+beaten_rate = ((beaten_by_possession + beaten_by_movement) / rakip yarisi OBE sayisi) * 100
 ```
 
 ### Cikti Degerleri
@@ -453,14 +475,15 @@ beaten_rate = ((beaten_by_possession + beaten_by_movement) / toplam OBE) * 100
 |-------|----------|
 | `shots_after_pressing` | Pressing sonrasi 10 sn icindeki sut sayisi |
 | `goals_after_pressing` | Pressing sonrasi 10 sn icindeki gol sayisi |
-| `beaten_by_possession` | Top ile gecilme sayisi |
-| `beaten_by_movement` | Hareket ile gecilme sayisi |
+| `beaten_by_possession` | Rakip yarisi OBE'lerde top ile gecilme sayisi |
+| `beaten_by_movement` | Rakip yarisi OBE'lerde hareket ile gecilme sayisi |
 | `danger_rate` | Tehlike orani (%) |
-| `beaten_rate` | Gecilme orani (%) |
+| `beaten_rate` | Rakip yarisi OBE'lerde gecilme orani (%) |
+| `opp_half_engagements` | Rakip yarisi OBE sayisi (payda) |
 
 ### Yorum
 - `danger_rate` yuksekse pressing cok riskli (kumar)
-- `beaten_rate` yuksekse pressingci oyuncular kolayca geciliyor
+- `beaten_rate` yuksekse (ozellikle rakip yarisinda) pressing kolayca kiriliyor
 - `shots_per_match` yuksekse pressing sonrasi cok fazla sut yeniliyor
 
 ---
@@ -577,10 +600,25 @@ avg_chain_length = zincir uzunluklarinin ortalamasi
 | `chain_end_disruption` | Bozulmayla biten zincirler |
 | `subtypes_in_chains` | Zincir icindeki OBE tipleri dagilimisubtype |
 
+### Rakip yarisinda kolektif pres basina top kazanimi (`collective_chain_regain_opponent_half`)
+
+**Amaç:** Sadece **pressing zinciri** (kollektif pres) icinde, **rakip yarisinda** gerceklesen **direct/indirect regain** sayisini, **rakip yarisinda baslayan** zincir basina bolmek.
+
+**Payda:** `third_start` ∈ {middle_third, attacking_third} ve `index_in_pressing_chain == 1` olan satirlardan benzersiz `(match_id, pressing_chain_index)` zincir sayisi.
+
+**Pay:** Bu zincirlere ait tum OBE satirlari (mac icinde) ile eslesen, sonra yine rakip yarisinda filtrelenen `end_type` ∈ {direct_regain, indirect_regain} satirlari.
+
+```
+chain_regain_per_oh_chain = collective_regains_opp_half / chain_starts_opp_half
+```
+
+Lig tablosu: `chain_regain_per_oh_chain` (ondalik), `chain_regain_per_oh_chain_nt` (pay/payda metni). **Z_q’da kullanilmaz.**
+
 ### Yorum
 - `chains_per_match` yuksekse takim kolektif pressing yapiyor
 - `avg_chain_length` yuksekse (4+) pressing uzun sureli ve organize
 - `chain_end_regain / total_chains` orani zincirin ne kadar etkili oldugunu gosterir
+- `chain_regain_per_oh_chain` yuksekse, rakip yarisinda baslayan kolektif press zincirleri basina daha cok top kazanimi (OH icinde) gerceklesiyor
 
 ---
 
@@ -590,7 +628,7 @@ avg_chain_length = zincir uzunluklarinin ortalamasi
 > "Pressingimiz ilerleyisi durduran bir duvar mi, yoksa bizi acik birakan bir kumar mi?"
 
 ### Ne Olcer
-Tum pressing metriklerini tek bir bileske skora (0-100) donusturur. 5 bilesenden olusur, her biri esit agirlikta.
+Twelve “Calculating qualities” ile ayni: (1) metrik z’leri, (2) **Z_q_raw = Σ w·z**, (3) **Z_q = (Z_q_raw − μ_Z) / σ_Z**. **Nihai kalite skoru yalnizca Z_q** (havuzda ort ~0, std ~1). Tabloda **effectiveness_score** = **Z_q**; **z_q_raw** = **Z_q_raw**. UI etiketleri: Wall Z_q≥1, Gamble Z_q≤−1, arada Balanced (Twelve slaytinda yok; gorsel icin).
 
 ### Rakip verisi (PP / PO) — onemli
 
@@ -598,58 +636,70 @@ Rakip `player_possession` ve `passing_option` satirlari **sadece analiz edilen t
 
 ### Bilesenler
 
-| Bilesen | Ham Deger Kaynagi | Normalizasyon (guncel) |
-|---------|-------------------|------------------------|
-| **Recovery** | total_regains / total_obe * 100 | Lig tablosu: 20 takimin sezon degerleri arasinda yuzdelik dilim (0-100) |
-| **Block** | block_rate (Metrik 3) | Ayni |
-| **Forced Long Ball** | long_ball_delta (Metrik 2), isaretli (negatif olabilir) | Ayni |
-| **Beaten (pres kirilmasi)** | beaten_rate — presin ne siklikta asildigi (Metrik 8) | Ham oranin yuzdelik diliminin tersi: dusuk bypass = yuksek skor |
-| **Danger (pres altinda tehlike)** | danger_rate — pres sirasinda rakibin tehdidinin sicramasi (Metrik 8) | Ham oranin yuzdelik diliminin tersi: dusuk tehlike = yuksek skor |
+| Bilesen | Agirlik | Ham Deger Kaynagi | Z (havuz μ, σ; populasyon std ddof=0) |
+|---------|---------|-------------------|----------------------------------------|
+| **Recovery** | 0.30 | Rakip yarisi OBE: regain / opp_half_obe * 100 (`third_start` middle + attacking) | (x−μ)/σ |
+| **Forced Long Ball** | 0.20 | long_ball_delta (Metrik 2) | (x−μ)/σ |
+| **xT Disruption** | 0.20 | xt_disruption_pct (Metrik 6) | (x−μ)/σ |
+| **Bypass** | 0.10 | bypass_rate (Metrik 4) | (μ−x)/σ |
+| **Danger** | 0.10 | danger_rate (Metrik 8) | (μ−x)/σ |
+| **Beaten** | 0.05 | beaten_rate (Metrik 8, rakip yarisi) | (μ−x)/σ |
+| **PPDA** | 0.05 | ppda_overall (Metrik 5) | (μ−x)/σ |
 
-**Lig ozeti:** Her bilesen, o metrikte tum takimlarin **sezon toplami** ham degerlerine gore siralanir; takimin degeri kac takimi geride birakiyorsa o yuzde 0-100 bilesen skoru olur.
+*Not:* Bileske skorda **block_rate** (Metrik 3) artik yok; lig tablosunda ayri sutun olarak duruyor.
 
-**Tek mac analizi:** Ham degerler o mac icin hesaplanir; yuzdelik dilim referansi, sezondaki tum **(mac, takim)** gorunumleri (~756 ornek) uzerinden uretilir — boylece bir mac, diger maclardaki performanslara gore konumlanir (sezon ortalamasiyla karistirilmaz).
+**Lig:** Once her takim icin Z_q_raw, sonra Z_q = (Z_q_raw − ortalama(Z_q_raw)) / std(Z_q_raw) ( populasyon std, ddof=0).
+
+**Mac:** Ayni mantik ~756 (mac, takim) ornegi uzerinde.
 
 ### Hesaplama Adimi Adim
 
 ```
-1. Bes ham metrik hesaplanir: recovery_rate, block_rate, long_ball_delta, beaten_rate, danger_rate
-2. Referans dagilim secilir:
-   - Sezon / lig tablosu: 20 takimlik vektor
-   - Mac sayfasi: tum (mac, takim) ciftleri icin vektor (~756)
-3. Her "daha iyi yuksek" metrik icin: s = percentile_rank(ham, dagilim)  (0-100)
-4. beaten_rate ve danger_rate icin: s = 100 - percentile_rank(ham, dagilim)
-5. composite = (s_recovery + s_block + s_long_ball + s_not_beaten + s_not_danger) / 5
+1. Yedi ham metrik vektoru (lig veya mac-takim ornekleri)
+2. Her metrik icin z (μ, σ havuzdan; ddof=0)
+3. Z_q_raw = agirlikli z toplami (ayni w'ler)
+4. μ_Z = mean(Z_q_raw tum birimler), σ_Z = std(Z_q_raw); σ_Z < epsilon ise epsilon
+5. Z_q = (Z_q_raw - μ_Z) / σ_Z
 ```
 
 ### Formul
 
 ```
-percentile_rank(v, D) = (D icinde v'ye esit veya kucuk deger sayisi / |D|) * 100
-composite_score = (s_recovery + s_block + s_long_ball + s_not_beaten + s_not_danger) / 5
+Z_q_raw = Σ_m w_m * z_m
+Z_q = (Z_q_raw - μ_Z) / σ_Z
 ```
 
-### Etiketleme
+`score` (API) = `Z_q` (yuvarlanmis).
 
-| Skor Araligi | Etiket | Anlami |
-|-------------|--------|--------|
-| 60-100 | **Wall** | Pressing ilerleyisi durduran bir duvar |
-| 40-59 | **Balanced** | Dengeli pressing, risk ve odul dengeli |
-| 0-39 | **Gamble** | Pressing riskli, acik birakan bir kumar |
+### Etiketleme (yalniz UI; Twelve slaytinda tanimli degil)
+
+| Kosul | Etiket |
+|-------|--------|
+| Z_q ≥ 1 | **Wall** |
+| −1 < Z_q < 1 | **Balanced** |
+| Z_q ≤ −1 | **Gamble** |
 
 ### Cikti Degerleri
 
 | Deger | Aciklama |
 |-------|----------|
-| `score` | Bileske skor (0-100) |
-| `label` | "Wall" / "Balanced" / "Gamble" |
-| `components` | Her bilesenin normalize skoru |
-| `raw` | Her bilesenin ham degeri |
+| `score` | Z_q (Twelve nihai kalite) |
+| `z_composite_raw` | Z_q_raw |
+| `z_composite` | Z_q (score ile ayni) |
+| `label` | Wall / Balanced / Gamble (yukaridaki bantlar) |
+| `components` | Metrik basina z |
+| `raw` | Ham metrikler |
+
+### Lig tablosu ek sutunlar
+
+| Sutun | Aciklama |
+|-------|----------|
+| `effectiveness_score` | Z_q |
+| `z_q_raw` | Z_q_raw |
 
 ### Yorum
-- Radar grafikte 5 bilesen gorsellestirilir
-- Zayif bilesenler pressingin nerede kirildigini gosterir
-- Ornek: Recovery yuksek ama **Danger** bileseni dusukse → top sik kazaniliyor ama pres sirasinda rakip cok sik tehlikeli anlar yaratiyor (veya **Beaten** yuksekse pres kolayca kiriliyor)
+- Siralama **Z_q**’ya gore (yuksek = daha iyi)
+- Radar: metrik z’leri (adim 1); bilesik ozet **Z_q** (adim 3)
 
 ---
 
@@ -671,9 +721,10 @@ Belirli bir takimin her oyuncusu icin asagidaki OBE bazli istatistikleri hesapla
 | `regains` | Top kazanma sayisi |
 | `regain_rate` | Top kazanma orani (%) |
 | `force_backward` | Geri pas zorlatma sayisi |
-| `beaten_by_possession` | Top ile gecilme sayisi |
-| `beaten_by_movement` | Hareket ile gecilme sayisi |
-| `beaten_rate` | Toplam gecilme orani (%) |
+| `beaten_by_possession` | Rakip yarisi OBE'lerde top ile gecilme |
+| `beaten_by_movement` | Rakip yarisi OBE'lerde hareket ile gecilme |
+| `opp_half_engagements` | Rakip yarisi OBE sayisi |
+| `beaten_rate` | Rakip yarisi gecilme orani (%) |
 | `in_chain` | Pressing zincirlerine katilim sayisi |
 | `avg_speed` | Ortalama hiz (km/h) |
 | `avg_distance` | Ortalama mesafe (m) |
