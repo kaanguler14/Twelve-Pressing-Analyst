@@ -1,56 +1,56 @@
 # Twelve Pressing Analyst
 
-SkillCorner **Dynamic Events** verisiyle pressing metriklerini inceleyen Streamlit uygulaması (`pressing_app.py`).
+Streamlit app (`pressing_app.py`) for exploring pressing metrics from SkillCorner **Dynamic Events** data.
 
-## Veriyi nereye koymalısın?
+## Where to put the dataset
 
-Uygulama tek bir **veri kök klasörü** (`DATA_DIR`) bekler. Bu klasörü diskte istediğin yere koyabilirsin; önemli olan yapı ve dosya adlarıdır.
+The app expects a single **data root folder** (`DATA_DIR`). You can place that folder anywhere on disk; what matters is the layout and file names.
 
-### Klasör yapısı
+### Folder layout
 
 ```
 <DATA_DIR>/
-├── _pressing_cache.parquet    # Tüm maçların birleşik Dynamic Events tablosu
+├── _pressing_cache.parquet    # Combined Dynamic Events table for all matches
 └── meta/
-    ├── 12345.json             # match_id ile maç meta bilgisi (tarih, takımlar, skor, …)
+    ├── 12345.json             # Match metadata by match_id (date, teams, score, …)
     ├── 12346.json
     └── ...
 ```
 
-- **`_pressing_cache.parquet`**: Maç bazlı parquet dosyalarının birleştirilmiş hali; satırlarda `match_id` ve Dynamic Events şemasındaki sütunlar bulunur (detay için `PRESSING_METRICS_DOCUMENTATION.md`).
-- **`meta/`**: Her maç için `{match_id}.json` dosyaları. Maç seçici ve etiketler bu dosyalardan okunur.
+- **`_pressing_cache.parquet`**: Merged parquet from per-match exports; rows include `match_id` and Dynamic Events columns (see `PRESSING_METRICS_DOCUMENTATION.md` for detail).
+- **`meta/`**: One `{match_id}.json` per match. The match picker and labels read from these files.
 
-> **Not:** Bu veri SkillCorner lisansıyla gelir; repoya büyük parquet/meta dosyalarını ekleme. Veriyi kendi makinede veya SkillCorner’ten aldığın konumda tut.
+> **Note:** Data is subject to SkillCorner licensing; do not commit large parquet/meta files to this repo. Keep the data on your machine or wherever you obtain it from SkillCorner.
 
-### Kodda konumu bağlama
+### Pointing the code at your data
 
-`pressing_app.py` içinde `DATA_DIR` şu an sabit bir Windows yolu ile tanımlı:
+In `pressing_app.py`, `DATA_DIR` is currently a fixed Windows path:
 
 ```python
 DATA_DIR = Path(r"D:\ContextEngineeringProject\dynamic_events_pl_24\dynamic_events_pl_24")
 ```
 
-Kendi ortamında kullanmak için bu satırı **senin veri klasörünün tam yoluna** çevir (örnek):
+Change that line to **your data folder’s full path**, for example:
 
 ```python
-DATA_DIR = Path(r"C:\veri\dynamic_events_pl_24")
+DATA_DIR = Path(r"C:\data\dynamic_events_pl_24")
 ```
 
-veya proje içindeyse:
+or, if the data lives inside the project:
 
 ```python
 DATA_DIR = Path(__file__).resolve().parent / "dynamic_events_pl_24"
 ```
 
-Aynı `DATA_DIR` mantığı `pressing_metrics.py` içindeki önbellek dosyaları için de kullanılır; tek kök klasör yeterlidir.
+The same `DATA_DIR` is used for cache files under `pressing_metrics.py`; one root folder is enough.
 
 ---
 
-## Nasıl çalıştırılır?
+## How to run
 
-### 1. Python ortamı
+### 1. Python environment
 
-Python 3.10+ önerilir. Sanal ortam kullanman iyi olur:
+Python 3.10+ is recommended. A virtual environment is a good idea:
 
 ```powershell
 cd D:\ContextEngineeringProject
@@ -58,29 +58,29 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 2. Bağımlılıklar
+### 2. Dependencies
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Uygulamayı aç
+### 3. Launch the app
 
 ```powershell
 streamlit run pressing_app.py
 ```
 
-Tarayıcıda genelde `http://localhost:8501` açılır.
+The UI usually opens at `http://localhost:8501`.
 
 ---
 
-## İlgili dosyalar
+## Related files
 
-| Dosya | Açıklama |
-|-------|----------|
-| `pressing_app.py` | Pressing Analyst arayüzü |
-| `pressing_metrics.py` | Metrik hesapları |
-| `PRESSING_METRICS_DOCUMENTATION.md` | Metrik açıklamaları |
-| `PRESSING_METRICS_SPECIFICATION.md` | Formül / veri sözleşmesi |
+| File | Description |
+|------|-------------|
+| `pressing_app.py` | Pressing Analyst UI |
+| `pressing_metrics.py` | Metric computations |
+| `PRESSING_METRICS_DOCUMENTATION.md` | Metric documentation |
+| `PRESSING_METRICS_SPECIFICATION.md` | Formulas / data contract |
 
-`app.py` adlı eski dashboard varsa o dosya **`_all_events_cache.parquet`** ve `dynamic/` alt yapısını kullanır; Pressing Analyst ile aynı cache dosyası değildir.
+If you use the older `app.py` dashboard, it relies on **`_all_events_cache.parquet`** and a `dynamic/` layout; that is not the same cache as Pressing Analyst.
